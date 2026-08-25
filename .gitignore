@@ -1,0 +1,5 @@
+env/
+__pycache__/
+.vscode/
+data/*.parquet
+data/*.npy
