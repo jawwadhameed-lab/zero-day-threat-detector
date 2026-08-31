@@ -1,29 +1,36 @@
 import streamlit as st
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-import json
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+import joblib
 
-st.set_page_config(page_title="Zero-Day Threat Detector", layout="wide", page_icon="🛡️")
+# Page Layout
+st.set_page_config(page_title="AI Zero-Day Attack Detection", layout="wide")
+st.title("🛡️ AI-Based Zero-Day Threat Detection")
 
-# Custom Title Header
-st.title("🛡️ AI-Based Zero-Day Threat Detection System")
-st.markdown("Automated Behavioral Anomaly Detection using Deep Autoencoder")
+# --- IPS SESSION STATE INITIALIZATION ---
+if 'blacklist' not in st.session_state:
+    st.session_state.blacklist = []
+if 'total_blocked' not in st.session_state:
+    st.session_state.total_blocked = 0
 
-# Load Model Metadata & Architecture
+# Helper Function: Mock IP Generator for Demo
+def generate_mock_ip(idx):
+    np.random.seed(int(idx))
+    return f"192.168.{np.random.randint(1, 10)}.{np.random.randint(2, 254)}"
+
+# --- LOAD ASSETS ---
 @st.cache_resource
-def load_system():
-    with open('models/metadata.json', 'r') as f:
-        metadata = json.load(f)
+def load_assets():
+    scaler = joblib.load("models/scaler.pkl")
+    X_test = np.load("data/X_test.npy")
+    y_test = np.load("data/y_test.npy")
     
-    input_dim = metadata['input_dim']
-    
-    class AnomalyAutoencoder(nn.Module):
+    # Autoencoder Architecture
+    class Autoencoder(nn.Module):
         def __init__(self, input_dim):
-            super(AnomalyAutoencoder, self).__init__()
+            super().__init__()
             self.encoder = nn.Sequential(
                 nn.Linear(input_dim, 20),
                 nn.ReLU(),
@@ -36,85 +43,86 @@ def load_system():
                 nn.Linear(20, input_dim),
                 nn.Sigmoid()
             )
-
         def forward(self, x):
             return self.decoder(self.encoder(x))
 
-    model = AnomalyAutoencoder(input_dim)
-    model.load_state_dict(torch.load('models/autoencoder.pth'))
+    model = Autoencoder(X_test.shape[1])
+    model.load_state_dict(torch.load("models/autoencoder.pth", weights_only=True))
     model.eval()
-    return model, metadata['threshold']
+    return model, scaler, X_test, y_test
 
-model, threshold = load_system()
+model, scaler, X_test, y_test = load_assets()
+OPTIMAL_THRESHOLD = 0.001652
 
-# Sidebar Configuration
-st.sidebar.title("📊 System Configuration")
-st.sidebar.metric("Active Anomaly Threshold", f"{threshold:.6f}")
-st.sidebar.info("Traffic packets with Reconstruction Loss > Threshold are flagged as Zero-Day Anomalies.")
+# --- SIDEBAR: IPS STATUS & METRICS ---
+st.sidebar.header("🛡️ IPS Control Panel")
+metric1_holder = st.sidebar.empty()
+metric2_holder = st.sidebar.empty()
 
-# Dashboard Tabs Navigation
-tab1, tab2 = st.tabs(["⚡ Live Packet Inspector", "📈 Batch Analytics & Loss Graph"])
+if st.sidebar.button("Clear Blacklist / Reset IPS"):
+    st.session_state.blacklist = []
+    st.session_state.total_blocked = 0
+    st.sidebar.success("IPS Rules Reset Successfully!")
 
-# TAB 1: Single Packet Inspection
+# --- MAIN DASHBOARD TABS ---
+tab1, tab2 = st.tabs(["🚀 Live Traffic Inspection & IPS", "📋 Active Blacklist & Firewall Rules"])
+
 with tab1:
-    st.subheader("Real-Time Traffic Inspection")
-    if st.button("Run Random Traffic Test Sample", type="primary"):
-        X_test = np.load('data/X_test.npy')
-        y_test = np.load('data/y_test.npy')
-        
-        idx = np.random.randint(0, len(X_test))
-        sample = X_test[idx : idx + 1]
-        actual_label = "Attack / Anomaly" if y_test[idx] == 1 else "Normal Safe Traffic"
-        
-        sample_tensor = torch.tensor(sample, dtype=torch.float32)
-        with torch.no_grad():
-            reconstructed = model(sample_tensor)
-            error = torch.mean((sample_tensor - reconstructed) ** 2).item()
-        
-        is_anomaly = error > threshold
-        
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Reconstruction Error Loss", f"{error:.6f}")
-        col2.metric("AI Verdict", "🚨 ZERO-DAY THREAT" if is_anomaly else "✅ SAFE TRAFFIC")
-        col3.metric("Ground Truth Label", actual_label)
-        
-        if is_anomaly:
-            st.error("⚠️ ALERT: High Reconstruction Loss detected! Behavior deviates from normal baseline profiles.")
-        else:
-            st.success("✅ SAFE: Traffic pattern closely matches trusted network baseline.")
+    st.subheader("Real-Time Traffic Packet Inspection")
+    
+    if st.button("Run Random Traffic Test Sample"):
+        sample_idx = np.random.randint(0, len(X_test))
+        sample_data = X_test[sample_idx:sample_idx+1]
+        actual_label = y_test[sample_idx]
+        mock_ip = generate_mock_ip(sample_idx)
 
-# TAB 2: Batch Analysis & Visual Chart
-with tab2:
-    st.subheader("Batch Sample Analytics (1,000 Traffic Packets)")
-    if st.button("Run Batch Evaluation Analysis"):
-        X_test = np.load('data/X_test.npy')[:1000]
-        y_test = np.load('data/y_test.npy')[:1000]
-        
-        test_tensor = torch.tensor(X_test, dtype=torch.float32)
+        # Model Prediction
         with torch.no_grad():
-            reconstructed = model(test_tensor)
-            errors = torch.mean((test_tensor - reconstructed) ** 2, dim=1).numpy()
-        
-        preds = (errors > threshold).astype(int)
-        
-        c1, c2 = st.columns(2)
-        c1.metric("Flagged Zero-Day Threats", int(sum(preds)))
-        c2.metric("Verified Safe Traffic Packets", int(len(preds) - sum(preds)))
-        
-        # Loss Distribution Chart
-        fig, ax = plt.subplots(figsize=(10, 3.5))
-        sns.histplot(errors, bins=50, kde=True, ax=ax, color='purple')
-        ax.axvline(threshold, color='red', linestyle='--', linewidth=2, label=f'Threshold ({threshold:.5f})')
-        ax.set_title("Reconstruction Error Distribution vs Anomaly Threshold")
-        ax.set_xlabel("Reconstruction Loss")
-        ax.legend()
-        st.pyplot(fig)
-        
-        # Data Table
-        df_res = pd.DataFrame({
-            'Packet Index': range(1, 1001),
-            'Reconstruction Loss': errors,
-            'Prediction': ["Threat (Anomaly)" if p == 1 else "Safe Traffic" for p in preds],
-            'Actual Label': ["Attack" if y == 1 else "Normal" for y in y_test]
+            sample_tensor = torch.FloatTensor(sample_data)
+            reconstruction = model(sample_tensor)
+            loss = torch.mean((sample_tensor - reconstruction) ** 2, dim=1).item()
+
+        is_anomaly = loss > OPTIMAL_THRESHOLD
+
+        # Display Traffic Info
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Source IP Address", mock_ip)
+        col2.metric("Reconstruction Loss", f"{loss:.6f}")
+        col3.metric("Ground Truth Label", "Attack" if actual_label == 1 else "Normal")
+
+        st.markdown("---")
+
+        # --- IPS PREVENTION LOGIC ---
+        if is_anomaly:
+            if mock_ip not in st.session_state.blacklist:
+                st.session_state.blacklist.append(mock_ip)
+                st.session_state.total_blocked += 1
+
+            st.error(f"🛑 **[IPS PREVENTION ACTION ACTIVATED]**")
+            st.warning(f"Zero-Day Anomaly Detected from Source IP: **{mock_ip}** (Loss > {OPTIMAL_THRESHOLD:.6f})")
+            st.info("⚡ **Automated Mitigation:** Packet status set to **DROPPED & BLOCKED**.")
+            
+            st.markdown("**Generated System Command (Firewall Rule):**")
+            st.code(f"sudo iptables -A INPUT -s {mock_ip} -j DROP", language="bash")
+
+        else:
+            if mock_ip in st.session_state.blacklist:
+                st.error(f"🛑 Traffic from IP **{mock_ip}** was rejected because IP is currently BLACKLISTED.")
+            else:
+                st.success(f"✅ **[IPS ACTION ALLOWED]** Traffic packet from IP **{mock_ip}** is safe. Packet forwarded.")
+
+with tab2:
+    st.subheader("📋 Active Blacklisted IPs (Firewall Engine)")
+    
+    if len(st.session_state.blacklist) > 0:
+        df_bl = pd.DataFrame({
+            "Blocked Source IP": st.session_state.blacklist,
+            "Action Taken": ["PACKET_DROP"] * len(st.session_state.blacklist),
+            "Firewall Protocol": ["IPTABLES_DROP"] * len(st.session_state.blacklist)
         })
-        st.dataframe(df_res, use_container_width=True)
+        st.table(df_bl)
+    else:
+        st.info("No IPs are currently blacklisted. All traffic operating normally.")
+        
+metric1_holder.metric("Active Blocked IPs", len(st.session_state.blacklist))
+metric2_holder.metric("Total Packets Dropped", st.session_state.total_blocked)        
